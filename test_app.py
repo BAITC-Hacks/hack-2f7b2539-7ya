@@ -219,6 +219,22 @@ class DemoContextTests(unittest.TestCase):
         self.assertEqual(app._session(self.session_id)["cart"], {})
         self.assertEqual(app._session(self.session_id)["pending"]["product"]["article"], "DEMO-101")
 
+    def test_explicit_article_add_with_unit_waits_for_quantity_confirmation(self):
+        app.respond("Найди товар DEMO-101", self.session_id)
+        state = app._session(self.session_id)
+        before = deepcopy(state["cart"])
+
+        proposal = app.respond("Добавь 2 штуки DEMO-101", self.session_id)
+        self.assertIn("DEMO-101", proposal["reply"])
+        self.assertIn("количество 2 шт.", proposal["reply"])
+        self.assertEqual(proposal["cart"], [])
+        self.assertEqual(state["cart"], before)
+        self.assertEqual(state["pending"]["product"]["article"], "DEMO-101")
+
+        result = app.respond("Да, добавь 2 штуки", self.session_id)
+        self.assertEqual(result["cart"][0]["article"], "DEMO-101")
+        self.assertEqual(result["cart"][0]["quantity"], 2)
+
     def test_ambiguous_product_selection_requests_clarification_and_clears_context(self):
         app.respond("покажи DEMO-101", self.session_id)
         result = app.respond("покажи ноутбук", self.session_id)

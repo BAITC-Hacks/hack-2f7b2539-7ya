@@ -280,9 +280,19 @@ def _requested_quantity(message):
 
 def _product_query(message):
     cleaned = re.sub(r"\b(DEMO-\d+)(?:-[\w]+)?\b", r"\1", message, flags=re.I)
-    cleaned = re.sub(r"добавь|добавить|положи|положить|в|корзину|корзина|корзине|add|to|cart|қос(?:шы|у)?|себетке|себет|дана", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"добавь|добавить|положи|положить|в|корзину|корзина|корзине|add|to|cart|қос(?:шы|у)?|себетке|себет|дана|штук(?:а|и|у)?|шт\.?|единиц(?:а|ы|у)?", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"(?<![\w-])\d+(?![\w-])", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" ,.!?:;")
+
+
+def _demo_confirmation(message, pending):
+    match = re.fullmatch(
+        r"\s*(?:(?:да|иә|ия|yes)(?:\s*,?\s*(?:добавь|добавить|қос(?:шы|у)?)(?:\s+(?P<quantity>\d+)(?:\s*(?:штук(?:а|и|у)?|шт\.?|дана))?)?)?|подтверждаю|подтвердить)\s*[.!]*\s*",
+        message, re.I)
+    if not match:
+        return None
+    confirmed_quantity = match.group("quantity")
+    return confirmed_quantity is None or int(confirmed_quantity) == pending["quantity"]
 
 
 def _demo_purchase_terms(query):
@@ -358,7 +368,8 @@ def respond(message, session_id="demo"):
         state = _session(session_id)
         pending = state.get("pending")
         if pending:
-            if re.fullmatch(r"\s*(да|да,?\s*(добавь|подтверждаю)|подтверждаю|подтвердить|yes|иә|ия|иә,?\s*қос(?:шы|у)?)\s*[.!]*\s*", query, re.I):
+            confirmation = _demo_confirmation(query, pending)
+            if confirmation is True:
                 product, quantity = pending["product"], pending["quantity"]
                 article = product["article"]
                 available = _demo_stock(product) - state["cart"].get(article, {}).get("quantity", 0)
@@ -369,6 +380,8 @@ def respond(message, session_id="demo"):
                 current["quantity"] += quantity
                 return {"reply": f"Добавлено в demo-корзину: {product['name']} — {quantity} шт. Доступный stock до добавления: {available} шт.",
                         "products": [], "mode": "demo", "cart": _cart_view(state), "cart_url": "/demo-cart"}
+            if confirmation is False:
+                return _cart_reply(state, f"В предложении указано {pending['quantity']} шт. Подтвердите это количество; корзина пока не изменена.")
             if re.fullmatch(r"\s*(нет|отмена|отмени|отменить|не добавляй|no|жоқ|жоқ,?\s*қоспа)\s*[.!]*\s*", query, re.I):
                 state["pending"] = None
                 return _cart_reply(state, "Хорошо, отменил. Demo-корзина не изменена.")
