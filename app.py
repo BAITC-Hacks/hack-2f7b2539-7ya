@@ -105,6 +105,91 @@ def _safe_product(row):
             "characteristics": characteristics}
 
 
+DEMO_CATEGORY_ROOTS = {
+    "laptop": ("ноутбук", "ноут", "лэптоп", "лаптоп", "laptop", "notebook"),
+    "mouse": ("мыш", "mouse", "mice", "мышк", "указател", "pointer"),
+}
+DEMO_CATEGORY_NAMES = {"laptop": "ноутбук", "mouse": "мышь"}
+DEMO_QUERY_FILLER = {
+    "a", "an", "the", "for", "i", "need", "find", "show", "please", "alternative", "replacement",
+    "подбери", "подобрать", "найди", "найти", "ищу", "нужен", "нужна", "нужно", "покажи", "пожалуйста", "no",
+    "альтернатива", "замена", "вместо", "нет", "наличии", "наличие", "товар", "товара", "есть",
+    "доступный", "доступная", "stock", "available", "в", "и", "без",
+}
+DEMO_CATEGORY_SYNONYMS = {word for roots in DEMO_CATEGORY_ROOTS.values() for word in roots} | {"portable", "computer"}
+
+
+def _demo_category(text):
+    tokens = re.findall(r"[\w-]+", str(text).casefold())
+    if "portable" in tokens and "computer" in tokens:
+        return "laptop"
+    for category, roots in DEMO_CATEGORY_ROOTS.items():
+        if any(token.startswith(root) for token in tokens for root in roots):
+            return category
+    return None
+
+
+def _demo_characteristic_text(product):
+    attributes = product.get("characteristics") or product.get("attributes") or {}
+    pairs = []
+    if isinstance(attributes, dict):
+        pairs = [(str(key), str(value)) for key, value in attributes.items() if not isinstance(value, (dict, list))]
+    elif isinstance(attributes, list):
+        pairs = [(str(item.get("name", item.get("key", "Характеристика"))),
+                  str(item.get("value", item.get("valueName", "")))) for item in attributes if isinstance(item, dict)]
+    return pairs
+
+
+def _demo_query_fits_candidate(query, candidate):
+    article_free = re.sub(r"\bDEMO-\d+\b", " ", query, flags=re.I)
+    tokens = set(re.findall(r"[\w-]+", article_free.casefold()))
+    evidence_text = _text(candidate, ("name", "title")) + " " + " ".join(
+        f"{key} {value}" for key, value in _demo_characteristic_text(candidate))
+    evidence = set(re.findall(r"[\w-]+", evidence_text.casefold()))
+    required_numbers = set(re.findall(r"\d+(?:[.,]\d+)?", article_free))
+    evidence_numbers = set(re.findall(r"\d+(?:[.,]\d+)?", evidence_text))
+    if not required_numbers.issubset(evidence_numbers):
+        return False
+    for token in tokens:
+        if (token in DEMO_QUERY_FILLER or token in DEMO_CATEGORY_SYNONYMS
+                or token.isdigit() or _demo_category(token)):
+            continue
+        if token not in evidence:
+            return False
+    return True
+
+
+def _demo_alternative_card(candidate, category):
+    product = _safe_product(candidate)
+    properties = _demo_characteristic_text(candidate)
+    facts = "; ".join(f"{key}: {value}" for key, value in properties[:3])
+    explanation = (f"Та же категория ({DEMO_CATEGORY_NAMES[category]}), demo-остаток {candidate.get('stock', 0)} шт.")
+    if facts:
+        explanation += f"; характеристики из demo-карточки: {facts}."
+    else:
+        explanation += "."
+    product["alternative_reason"] = explanation
+    return product
+
+
+def _demo_alternatives(query, rows, reference_products=()):
+    reference_products = tuple(reference_products)
+    category = (_demo_category(_text(reference_products[0], ("name", "title")))
+                if reference_products else _demo_category(query))
+    if category is None:
+        return []
+    excluded = {_text(row, ("article", "sku", "articul", "code")).casefold() for row in reference_products}
+    alternatives = []
+    for row in rows:
+        if not isinstance(row, dict) or _demo_category(_text(row, ("name", "title"))) != category:
+            continue
+        article = _text(row, ("article", "sku", "articul", "code")).casefold()
+        if article in excluded or _demo_stock(row) <= 0 or not _demo_query_fits_candidate(query, row):
+            continue
+        alternatives.append(_demo_alternative_card(row, category))
+    return alternatives
+
+
 def _session(session_id):
     with DEMO_SESSIONS_LOCK:
         return DEMO_SESSIONS.setdefault(session_id, {"cart": {}, "pending": None})
@@ -283,7 +368,27 @@ def respond(message, session_id="demo"):
     mode_note = "ДЕМО: синтетические данные, не отражают реальный каталог." if DEMO_MODE else ""
     if DEMO_MODE:
         mode_note = prefix + mode_note
+        if matches and all(_demo_stock(row) <= 0 for row in matches):
+            alternatives = _demo_alternatives(query, catalog_rows, matches)
+            product_name = _text(matches[0], ("name", "title")) or query
+            if alternatives:
+                reply = (f"Товар {product_name} найден, но сейчас его нет в demo-остатке. "
+                         "Возможные альтернативы той же категории; основание выбора указано у каждой позиции.")
+            else:
+                reply = (f"Товар {product_name} найден, но сейчас его нет в demo-остатке. "
+                         "В demo-каталоге нет доступной релевантной альтернативы с подтверждаемыми характеристиками.")
+            return {"reply": (mode_note + " " if mode_note else "") + reply, "products": alternatives, "mode": mode}
     if not matches:
+        if DEMO_MODE:
+            suggestions = _demo_alternatives(query, catalog_rows)
+            if suggestions:
+                reply = ("Точного совпадения в demo-каталоге нет. Возможные альтернативы той же категории; "
+                         "основание выбора указано у каждой позиции.")
+            else:
+                reply = ("Точного совпадения в demo-каталоге нет, и для этого запроса не нашлось "
+                         "подтверждённой релевантной demo-альтернативы.")
+            return {"reply": (mode_note + " " if mode_note else "") + reply,
+                    "products": suggestions, "mode": mode}
         # Suggest plausible catalog alternatives by token overlap, and label them
         # clearly as suggestions rather than claiming they are equivalent.
         tokens = {t for t in re.findall(r"[\w-]+", query.casefold()) if len(t) > 1}
@@ -312,7 +417,7 @@ PAGE = r'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="view
 <main><section class="box"><header class="head"><h1>Помощник по каталогу EKT</h1><p>Поиск товара по артикулу или названию</p><p style="font-weight:700;color:#ffe18a">__MODE_LABEL__</p></header><div class="messages" id="messages"><div class="msg">Здравствуйте! Укажите артикул или название товара — проверю каталог, наличие и характеристики.</div></div><form class="form" id="form"><input id="q" maxlength="160" autocomplete="off" placeholder="Например, артикул или название" required><button id="send">Найти</button></form><small>Чат только показывает сведения каталога. Он не оформляет заказы и не запрашивает платёжные данные.</small></section></main>
 <script>const log=document.querySelector('#messages'), form=document.querySelector('#form'), input=document.querySelector('#q'), send=document.querySelector('#send');
 function msg(text, cls=''){let d=document.createElement('div');d.className='msg '+cls;d.textContent=text;log.append(d);log.scrollTop=log.scrollHeight;return d}
-form.onsubmit=async e=>{e.preventDefault();let text=input.value.trim();if(!text)return;msg(text,'user');input.value='';send.disabled=true;try{let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});let data=await r.json();msg(data.reply||'Не удалось обработать запрос.');for(let p of (data.products||[])){let box=document.createElement('div');box.className='card';let h=document.createElement('h3');h.textContent=p.name;box.append(h);let line=document.createElement('div');line.className='muted';line.textContent='Артикул: '+p.article+' · Наличие: '+p.stock+(p.price?' · Цена: '+p.price:'');box.append(line);if(p.characteristics?.length){let ul=document.createElement('ul');ul.className='attrs';for(let a of p.characteristics){let li=document.createElement('li');li.textContent=(a.name||a.key||'Характеристика')+': '+(a.value??a.valueName??'');ul.append(li)}box.append(ul)}log.append(box)}if(data.certificate_url){let a=document.createElement('a');a.href=data.certificate_url;a.textContent='Открыть demo-макет сертификата';a.className='msg';a.style.display='inline-block';log.append(a)}if(data.cart_url){let a=document.createElement('a');a.href=data.cart_url;a.textContent='Открыть demo-корзину';a.className='msg';a.style.display='inline-block';log.append(a)}log.scrollTop=log.scrollHeight}catch{msg('Сервис временно недоступен. Попробуйте позже.')}finally{send.disabled=false;input.focus()}};</script></html>'''
+form.onsubmit=async e=>{e.preventDefault();let text=input.value.trim();if(!text)return;msg(text,'user');input.value='';send.disabled=true;try{let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});let data=await r.json();msg(data.reply||'Не удалось обработать запрос.');for(let p of (data.products||[])){let box=document.createElement('div');box.className='card';let h=document.createElement('h3');h.textContent=p.name;box.append(h);let line=document.createElement('div');line.className='muted';line.textContent='Артикул: '+p.article+' · Наличие: '+p.stock+(p.price?' · Цена: '+p.price:'');box.append(line);if(p.alternative_reason){let reason=document.createElement('div');reason.className='muted';reason.textContent='Почему предложен: '+p.alternative_reason;box.append(reason)}if(p.characteristics?.length){let ul=document.createElement('ul');ul.className='attrs';for(let a of p.characteristics){let li=document.createElement('li');li.textContent=(a.name||a.key||'Характеристика')+': '+(a.value??a.valueName??'');ul.append(li)}box.append(ul)}log.append(box)}if(data.certificate_url){let a=document.createElement('a');a.href=data.certificate_url;a.textContent='Открыть demo-макет сертификата';a.className='msg';a.style.display='inline-block';log.append(a)}if(data.cart_url){let a=document.createElement('a');a.href=data.cart_url;a.textContent='Открыть demo-корзину';a.className='msg';a.style.display='inline-block';log.append(a)}log.scrollTop=log.scrollHeight}catch{msg('Сервис временно недоступен. Попробуйте позже.')}finally{send.disabled=false;input.focus()}};</script></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):

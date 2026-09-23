@@ -55,7 +55,7 @@ class DemoCertificateTests(unittest.TestCase):
         product = app.respond("DEMO-101", self.session_id)["products"][0]
         self.assertEqual(product["stock"], "8")
         self.assertTrue(product["characteristics"])
-        alternatives = app.respond("ноутбук игровой", "certificate-test-alternatives")
+        alternatives = app.respond("лэптоп", "certificate-test-alternatives")
         self.assertEqual(len(alternatives["products"]), 2)
 
 
@@ -109,6 +109,58 @@ class DemoCartViewTests(unittest.TestCase):
                 self.assertIn("не изменена", result["reply"])
                 self.assertEqual(result["cart"], [])
                 self.assertEqual(app._session(self.session_id)["cart"], {})
+
+
+class DemoAlternativeTests(unittest.TestCase):
+    def setUp(self):
+        self.was_demo = app.DEMO_MODE
+        app.DEMO_MODE = True
+
+    def tearDown(self):
+        app.DEMO_MODE = self.was_demo
+
+    def test_synonym_query_gets_same_category_alternatives_with_rationale(self):
+        result = app.respond("лэптоп", "alternative-synonym-test")
+
+        self.assertEqual(result["mode"], "demo")
+        self.assertEqual(len(result["products"]), 2)
+        for product in result["products"]:
+            self.assertIn("ноутбук", product["name"].casefold())
+            self.assertGreater(int(product["stock"]), 0)
+            self.assertIn("та же категория", product["alternative_reason"].casefold())
+            self.assertIn("характеристики из demo-карточки", product["alternative_reason"])
+        mouse = app.respond("pointer", "alternative-pointer-test")
+        self.assertEqual([row["article"] for row in mouse["products"]], ["DEMO-201"])
+        self.assertIn("Подключение", mouse["products"][0]["alternative_reason"])
+
+    def test_out_of_stock_item_gets_available_same_category_alternative(self):
+        demo_products = deepcopy(app.DEMO_PRODUCTS)
+        demo_products[0]["stock"] = 0
+        with patch.object(app, "DEMO_PRODUCTS", demo_products):
+            result = app.respond("DEMO-101", "alternative-out-of-stock-test")
+
+        self.assertIn("нет в demo-остатке", result["reply"])
+        self.assertEqual([row["article"] for row in result["products"]], ["DEMO-102"])
+        self.assertIn("Та же категория", result["products"][0]["alternative_reason"])
+        self.assertIn("Экран", result["products"][0]["alternative_reason"])
+
+    def test_no_relevant_alternative_is_reported_instead_of_random_item(self):
+        for query in ("холодильник", "laptop RTX 4090"):
+            with self.subTest(query=query):
+                result = app.respond(query, "alternative-none-test")
+                self.assertEqual(result["products"], [])
+                self.assertIn("не нашлось", result["reply"])
+                self.assertIn("релевантной", result["reply"])
+
+    def test_out_of_stock_category_without_available_replacement_is_reported(self):
+        demo_products = deepcopy(app.DEMO_PRODUCTS)
+        demo_products[0]["stock"] = 0
+        demo_products[1]["stock"] = 0
+        with patch.object(app, "DEMO_PRODUCTS", demo_products):
+            result = app.respond("DEMO-101", "alternative-no-stock-test")
+
+        self.assertEqual(result["products"], [])
+        self.assertIn("нет доступной релевантной альтернативы", result["reply"])
 
 
 if __name__ == "__main__":
