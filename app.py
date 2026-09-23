@@ -130,6 +130,19 @@ def _demo_cart_intent(message):
     return bool(re.search(r"\b(добавь|добавить|положи|положить|корзин[уы]?|add|cart)\b", message.casefold()))
 
 
+def _demo_cart_view_intent(message):
+    return bool(re.fullmatch(r"\s*(корзина|покажи корзину|моя корзина)\s*[.!?]*\s*", message, re.I))
+
+
+def _demo_cart_contents(state):
+    items = _cart_view(state)
+    lines = [f"{row['name']} ({row['article']}) — {row['quantity']} шт." for row in items]
+    total_quantity = sum(row["quantity"] for row in items)
+    summary = (f"Итого: товарных позиций — {len(items)}, единиц — {total_quantity} шт. "
+               "Сумма к оплате в demo-режиме не рассчитывается.")
+    return "Содержимое demo-корзины:\n" + "\n".join(lines + [summary])
+
+
 def _requested_quantity(message):
     # Digits inside article codes such as DEMO-101 are not quantities.
     found = re.findall(r"(?<![\w-])\d+(?![\w-])", message)
@@ -229,6 +242,11 @@ def respond(message, session_id="demo"):
             prefix = "Предыдущее предложение отменено без явного подтверждения. "
         else:
             prefix = ""
+        if _demo_cart_view_intent(query):
+            if not state["cart"]:
+                return _cart_reply(state, "Demo-корзина пуста.")
+            return {"reply": prefix + _demo_cart_contents(state), "products": [], "mode": "demo",
+                    "cart": _cart_view(state), "cart_url": "/demo-cart"}
         if _demo_cart_intent(query):
             quantity = _requested_quantity(query)
             product_text = _product_query(query)
@@ -255,8 +273,6 @@ def respond(message, session_id="demo"):
         certificate_reply = _demo_certificate_response(query, state, prefix)
         if certificate_reply:
             return certificate_reply
-        if re.fullmatch(r"\s*(корзина|покажи корзину|моя корзина)\s*[.!]*\s*", query, re.I):
-            return _cart_reply(state, "Demo-корзина пуста." if not state["cart"] else "Содержимое demo-корзины:")
     # The assistant performs catalog lookup only. It cannot place orders, reserve stock,
     # request credentials/payment data, or claim availability absent an API value.
     try:
