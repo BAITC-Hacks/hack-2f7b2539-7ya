@@ -3,13 +3,19 @@ from __future__ import annotations
 
 import json
 import argparse
+import html
 import re
+import secrets
+import threading
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from ekt_api_client import EKTAPIError, get_product_detail, get_products
 
 DEMO_MODE = False
+DEMO_SESSIONS = {}
+DEMO_SESSIONS_LOCK = threading.Lock()
 DEMO_PRODUCTS = [
     {"id": "demo-101", "article": "DEMO-101", "name": "Ноутбук для офиса 15 дюймов", "stock": 8,
      "characteristics": {"Экран": "15.6 дюйма", "Память": "16 ГБ", "Накопитель": "512 ГБ SSD"}},
@@ -93,10 +99,92 @@ def _safe_product(row):
             "characteristics": characteristics}
 
 
-def respond(message):
+def _session(session_id):
+    with DEMO_SESSIONS_LOCK:
+        return DEMO_SESSIONS.setdefault(session_id, {"cart": {}, "pending": None})
+
+
+def _demo_stock(product):
+    try:
+        return int(product.get("stock", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cart_view(state):
+    return [{"article": article, "name": row["name"], "quantity": row["quantity"]}
+            for article, row in state["cart"].items()]
+
+
+def _cart_reply(state, reply):
+    return {"reply": reply, "products": [], "mode": "demo", "cart": _cart_view(state)}
+
+
+def _demo_cart_intent(message):
+    return bool(re.search(r"\b(добавь|добавить|положи|положить|корзин[уы]?|add|cart)\b", message.casefold()))
+
+
+def _requested_quantity(message):
+    # Digits inside article codes such as DEMO-101 are not quantities.
+    found = re.findall(r"(?<![\w-])\d+(?![\w-])", message)
+    return int(found[-1]) if found else None
+
+
+def _product_query(message):
+    cleaned = re.sub(r"\b(добавь|добавить|положи|положить|в|корзину|корзина|корзине|add|to|cart)\b", " ", message, flags=re.I)
+    cleaned = re.sub(r"(?<![\w-])\d+(?![\w-])", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.!?:;")
+
+
+def respond(message, session_id="demo"):
     query = message.strip()
     if not query:
         return {"reply": "Напишите артикул или название товара.", "products": []}
+    prefix = ""
+    if DEMO_MODE:
+        state = _session(session_id)
+        pending = state.get("pending")
+        if pending:
+            if re.fullmatch(r"\s*(да|да,?\s*(добавь|подтверждаю)|подтверждаю|подтвердить|yes)\s*[.!]*\s*", query, re.I):
+                product, quantity = pending["product"], pending["quantity"]
+                article = product["article"]
+                available = _demo_stock(product) - state["cart"].get(article, {}).get("quantity", 0)
+                state["pending"] = None
+                if quantity > available:
+                    return _cart_reply(state, f"Не добавил: сейчас доступно {max(available, 0)} шт. Корзина не изменена.")
+                current = state["cart"].setdefault(article, {"name": product["name"], "quantity": 0})
+                current["quantity"] += quantity
+                return {"reply": f"Добавлено в demo-корзину: {product['name']} — {quantity} шт. Доступный stock до добавления: {available} шт.",
+                        "products": [], "mode": "demo", "cart": _cart_view(state), "cart_url": "/demo-cart"}
+            if re.fullmatch(r"\s*(нет|отмена|отменить|не добавляй|no)\s*[.!]*\s*", query, re.I):
+                state["pending"] = None
+                return _cart_reply(state, "Хорошо, отменил. Demo-корзина не изменена.")
+            state["pending"] = None
+            prefix = "Предыдущее предложение отменено без явного подтверждения. "
+        else:
+            prefix = ""
+        if _demo_cart_intent(query):
+            quantity = _requested_quantity(query)
+            product_text = _product_query(query)
+            if not product_text:
+                return _cart_reply(state, prefix + "Укажите артикул или название и количество, например: «добавь 2 DEMO-101».")
+            if quantity is None or quantity < 1:
+                return _cart_reply(state, prefix + "Укажите положительное количество, например: «добавь 2 DEMO-101».")
+            candidates, _, _ = search(product_text)
+            if not candidates:
+                return _cart_reply(state, prefix + "Не нашёл такой товар. Уточните артикул или название; корзина не изменена.")
+            product = _safe_product(candidates[0])
+            if len(candidates) > 1 and product["article"].casefold() != product_text.casefold():
+                return {"reply": prefix + "Нашлось несколько товаров. Выберите один по артикулу, затем укажите количество.",
+                        "products": [_safe_product(row) for row in candidates], "mode": "demo", "cart": _cart_view(state)}
+            stock = _demo_stock(candidates[0])
+            available = stock - state["cart"].get(product["article"], {}).get("quantity", 0)
+            if quantity > available:
+                return _cart_reply(state, prefix + f"Запрошено {quantity} шт. {product['name']}; доступный stock — {max(available, 0)} шт. Уменьшите количество. Корзина не изменена.")
+            state["pending"] = {"product": product, "quantity": quantity}
+            return _cart_reply(state, prefix + f"Подтвердите добавление: {product['name']} (артикул {product['article']}), количество {quantity} шт.; доступный stock сейчас {available} шт. Напишите «да, добавь» для подтверждения или «отмена».")
+        if re.fullmatch(r"\s*(корзина|покажи корзину|моя корзина)\s*[.!]*\s*", query, re.I):
+            return _cart_reply(state, "Demo-корзина пуста." if not state["cart"] else "Содержимое demo-корзины:")
     # The assistant performs catalog lookup only. It cannot place orders, reserve stock,
     # request credentials/payment data, or claim availability absent an API value.
     try:
@@ -105,6 +193,8 @@ def respond(message):
         return {"reply": f"Не удалось проверить каталог EKT: {exc}", "products": [], "mode": "api"}
     mode = "demo" if DEMO_MODE else "api"
     mode_note = "ДЕМО: синтетические данные, не отражают реальный каталог." if DEMO_MODE else ""
+    if DEMO_MODE:
+        mode_note = prefix + mode_note
     if not matches:
         # Suggest plausible catalog alternatives by token overlap, and label them
         # clearly as suggestions rather than claiming they are equivalent.
@@ -134,16 +224,47 @@ PAGE = r'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="view
 <main><section class="box"><header class="head"><h1>Помощник по каталогу EKT</h1><p>Поиск товара по артикулу или названию</p><p style="font-weight:700;color:#ffe18a">__MODE_LABEL__</p></header><div class="messages" id="messages"><div class="msg">Здравствуйте! Укажите артикул или название товара — проверю каталог, наличие и характеристики.</div></div><form class="form" id="form"><input id="q" maxlength="160" autocomplete="off" placeholder="Например, артикул или название" required><button id="send">Найти</button></form><small>Чат только показывает сведения каталога. Он не оформляет заказы и не запрашивает платёжные данные.</small></section></main>
 <script>const log=document.querySelector('#messages'), form=document.querySelector('#form'), input=document.querySelector('#q'), send=document.querySelector('#send');
 function msg(text, cls=''){let d=document.createElement('div');d.className='msg '+cls;d.textContent=text;log.append(d);log.scrollTop=log.scrollHeight;return d}
-form.onsubmit=async e=>{e.preventDefault();let text=input.value.trim();if(!text)return;msg(text,'user');input.value='';send.disabled=true;try{let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});let data=await r.json();msg(data.reply||'Не удалось обработать запрос.');for(let p of (data.products||[])){let box=document.createElement('div');box.className='card';let h=document.createElement('h3');h.textContent=p.name;box.append(h);let line=document.createElement('div');line.className='muted';line.textContent='Артикул: '+p.article+' · Наличие: '+p.stock+(p.price?' · Цена: '+p.price:'');box.append(line);if(p.characteristics?.length){let ul=document.createElement('ul');ul.className='attrs';for(let a of p.characteristics){let li=document.createElement('li');li.textContent=(a.name||a.key||'Характеристика')+': '+(a.value??a.valueName??'');ul.append(li)}box.append(ul)}log.append(box)}for(let s of (data.suggestions||[]))msg(s);log.scrollTop=log.scrollHeight}catch{msg('Сервис временно недоступен. Попробуйте позже.')}finally{send.disabled=false;input.focus()}};</script></html>'''
+form.onsubmit=async e=>{e.preventDefault();let text=input.value.trim();if(!text)return;msg(text,'user');input.value='';send.disabled=true;try{let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});let data=await r.json();msg(data.reply||'Не удалось обработать запрос.');for(let p of (data.products||[])){let box=document.createElement('div');box.className='card';let h=document.createElement('h3');h.textContent=p.name;box.append(h);let line=document.createElement('div');line.className='muted';line.textContent='Артикул: '+p.article+' · Наличие: '+p.stock+(p.price?' · Цена: '+p.price:'');box.append(line);if(p.characteristics?.length){let ul=document.createElement('ul');ul.className='attrs';for(let a of p.characteristics){let li=document.createElement('li');li.textContent=(a.name||a.key||'Характеристика')+': '+(a.value??a.valueName??'');ul.append(li)}box.append(ul)}log.append(box)}if(data.cart_url){let a=document.createElement('a');a.href=data.cart_url;a.textContent='Открыть demo-корзину';a.className='msg';a.style.display='inline-block';log.append(a)}log.scrollTop=log.scrollHeight}catch{msg('Сервис временно недоступен. Попробуйте позже.')}finally{send.disabled=false;input.focus()}};</script></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _session_cookie(self):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            cookie = SimpleCookie()
+        morsel = cookie.get("ekt_demo_session")
+        if morsel and re.fullmatch(r"[a-f0-9]{32}", morsel.value):
+            return morsel.value, False
+        return secrets.token_hex(16), True
+
+    def _send_cookie(self, session_id):
+        self.send_header("Set-Cookie", f"ekt_demo_session={session_id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200")
+
     def do_GET(self):
-        if urlparse(self.path).path != "/":
+        path = urlparse(self.path).path
+        if DEMO_MODE and path == "/demo-cart":
+            session_id, is_new = self._session_cookie()
+            state = _session(session_id)
+            rows = _cart_view(state)
+            listing = "".join(f"<li>{html.escape(row['name'])} · {html.escape(row['article'])} — {row['quantity']} шт.</li>" for row in rows)
+            body = ("<!doctype html><html lang='ru'><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>Demo-корзина</title>"
+                    "<style>body{font:16px system-ui;max-width:680px;margin:8vh auto;padding:24px;color:#172033}main{border:1px solid #dce3ed;border-radius:16px;padding:24px}a{color:#1769aa}</style>"
+                    "<main><h1>Demo-корзина</h1><p><b>Синтетические данные, не заказ.</b></p>"
+                    + (f"<ul>{listing}</ul>" if rows else "<p>Корзина пока пуста.</p>")
+                    + "<p>Оплата и оформление заказа недоступны в demo-режиме.</p><a href='/'>Вернуться в чат</a></main></html>").encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            if is_new: self._send_cookie(session_id)
+            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if path != "/":
             self.send_error(404); return
         label = "ДЕМО-РЕЖИМ · синтетические данные" if DEMO_MODE else "РЕАЛЬНЫЙ РЕЖИМ · данные из API"
         body = PAGE.replace("__MODE_LABEL__", label).encode()
         self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+        if DEMO_MODE:
+            session_id, is_new = self._session_cookie()
+            if is_new: self._send_cookie(session_id)
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
@@ -156,9 +277,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             message = body.get("message", "") if isinstance(body, dict) else ""
             if not isinstance(message, str) or len(message) > 160: raise ValueError
-            result = respond(message)
+            session_id, is_new = self._session_cookie()
+            result = respond(message, session_id)
             raw = json.dumps(result, ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
+            if DEMO_MODE and is_new: self._send_cookie(session_id)
             self.send_header("Cache-Control", "no-store"); self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
         except (ValueError, json.JSONDecodeError):

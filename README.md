@@ -17,7 +17,11 @@ python app.py --demo
 
 This mode displays an obvious demo label in the page and marks each result as
 synthetic. Try `DEMO-101`, `мышь`, or a query such as `ноутбук игровой` to see a
-possible alternative suggestion. It never calls the EKT API.
+possible alternative suggestion. To stage a cart addition, enter `добавь 2 DEMO-101`.
+The cart stays unchanged until you confirm with `да, добавь`; then
+the chat offers a link to the demo cart. Quantities above available demo stock
+are rejected. Cart state is in memory for the browser session and clears when
+the server restarts. It never calls the EKT API.
 
 ### Live API mode
 
