@@ -220,7 +220,7 @@ def _demo_context_intent(query):
 
 
 def _demo_context_target(query, state, intent):
-    text = re.sub(r"\b(какой|какое|какая|сколько|есть|ли|а|и|покажи|показать|остаток|наличие|наличии|осталось|стоит|цена|цену|сертификат\w*|сертификац\w*|бар|ма|қанша|дана|бағасы|баға|сипаттам\w*|қасиет\w*|қандай|характеристик\w*|please|what|is|the|stock|availability|price|cost|how|much|certificate)\b", " ", query, flags=re.I)
+    text = re.sub(r"\b(какой|какое|какая|какие|какого|каком|сколько|есть|ли|а|и|у|в|на|этот|эта|это|этого|этой|этом|этим|данный|данная|данное|данного|данной|данном|товар|товара|товаре|товару|покажи|показать|остаток|наличие|наличии|осталось|стоит|цена|цену|сертификат\w*|сертификац\w*|характеристик\w*|бар|ма|қанша|дана|бағасы|баға|сипаттам\w*|қасиет\w*|қандай|please|what|is|the|stock|availability|price|cost|how|much|certificate)\b", " ", query, flags=re.I)
     text = re.sub(r"\s+", " ", text).strip(" ,.!?:;")
     if not text:
         product = _demo_context_product(state)
@@ -307,7 +307,7 @@ def _demo_certificate_response(query, state, prefix="", default_product=None):
     if not re.search(r"сертификат|сертификац|certificate|certification", query, re.I):
         return None
     product_text = re.sub(
-        r"\b(сертификат\w*|сертификац\w*|certificate\w*|certification\w*|покажи(?:те)?|есть|ли|у|для|на|по|товар\w*|документ\w*|а|бар|ма|please|show|is|there|any|does|this|have|of|for|product)\b",
+        r"\b(сертификат\w*|сертификац\w*|certificate\w*|certification\w*|покажи(?:те)?|есть|ли|у|для|на|по|этот|эта|это|этого|этой|этом|данный|данная|данное|данного|данной|товар\w*|документ\w*|а|бар|ма|please|show|is|there|any|does|this|have|of|for|product)\b",
         " ", query, flags=re.I)
     product_text = re.sub(r"\s+", " ", product_text).strip(" ,.!?:;")
     if not product_text and default_product is not None:

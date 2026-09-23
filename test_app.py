@@ -180,6 +180,22 @@ class DemoContextTests(unittest.TestCase):
         self.assertIn("DEMO-101", result["reply"])
         self.assertIn("доступно 8 шт.", result["reply"])
 
+    def test_full_sentence_followups_use_exactly_selected_product(self):
+        cases = (
+            ("Какие характеристики у этого товара?", "15.6 дюйма"),
+            ("Сколько этого товара есть в наличии?", "8 шт."),
+            ("Какая цена у этого товара?", "цена в синтетических demo-данных не указана"),
+            ("Есть ли сертификат на этот товар?", "DEMO-CERT-101"),
+        )
+        for message, expected in cases:
+            with self.subTest(message=message):
+                app.DEMO_SESSIONS.pop(self.session_id, None)
+                selected = app.respond("Найди товар DEMO-101", self.session_id)
+                self.assertEqual([row["article"] for row in selected["products"]], ["DEMO-101"])
+                result = app.respond(message, self.session_id)
+                self.assertIn("DEMO-101", result["reply"])
+                self.assertIn(expected, result["reply"])
+
     def test_selecting_another_product_switches_context(self):
         app.respond("покажи DEMO-101", self.session_id)
         app.respond("покажи DEMO-201", self.session_id)
@@ -296,6 +312,24 @@ class DemoKazakhTests(unittest.TestCase):
         alternatives = app.respond("Балама бар ма?", self.session_id)
         self.assertTrue(alternatives["products"])
         self.assertTrue(all(row.get("alternative_reason") for row in alternatives["products"]))
+
+
+class DemoSearchPhraseTests(unittest.TestCase):
+    def setUp(self):
+        self.was_demo = app.DEMO_MODE
+        app.DEMO_MODE = True
+        self.session_id = "demo-search-phrase-regression"
+        app.DEMO_SESSIONS.pop(self.session_id, None)
+
+    def tearDown(self):
+        app.DEMO_MODE = self.was_demo
+        app.DEMO_SESSIONS.pop(self.session_id, None)
+
+    def test_find_product_phrase_matches_exact_demo_article(self):
+        result = app.respond("Найди товар DEMO-101", self.session_id)
+        self.assertEqual(result["mode"], "demo")
+        self.assertEqual([row["article"] for row in result["products"]], ["DEMO-101"])
+        self.assertIn("Нашёл товар", result["reply"])
 
 
 if __name__ == "__main__":
