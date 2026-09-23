@@ -21,7 +21,15 @@ possible alternative suggestion. To stage a cart addition, enter `добавь 2
 The cart stays unchanged until you confirm with `да, добавь`; then
 the chat offers a link to the demo cart. Quantities above available demo stock
 are rejected. Cart state is in memory for the browser session and clears when
-the server restarts. It never calls the EKT API.
+the server restarts. Questions about payment (`оплата`), delivery (`доставка`),
+minimum batch (`минимальная партия`), or general purchase terms return clearly
+labelled synthetic examples. These examples are fictional placeholders, not
+EKT conditions. This flow exists only in demo mode and never calls the EKT API.
+Ask `сертификат DEMO-101` for a clearly labelled synthetic certificate mock;
+`сертификат DEMO-102` demonstrates an honest missing-certificate response.
+The mock document page is not an EKT document or proof of compliance.
+
+Run the focused regression checks with `python -m unittest test_app.py`.
 
 ### Live API mode
 

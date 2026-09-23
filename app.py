@@ -18,12 +18,18 @@ DEMO_SESSIONS = {}
 DEMO_SESSIONS_LOCK = threading.Lock()
 DEMO_PRODUCTS = [
     {"id": "demo-101", "article": "DEMO-101", "name": "Ноутбук для офиса 15 дюймов", "stock": 8,
-     "characteristics": {"Экран": "15.6 дюйма", "Память": "16 ГБ", "Накопитель": "512 ГБ SSD"}},
+     "characteristics": {"Экран": "15.6 дюйма", "Память": "16 ГБ", "Накопитель": "512 ГБ SSD"},
+     "certificate": {"title": "Demo-свидетельство соответствия DEMO-CERT-101", "description": "Синтетический макет: ноутбук DEMO-101 условно соответствует демонстрационному профилю офисного оборудования."}},
     {"id": "demo-102", "article": "DEMO-102", "name": "Ноутбук для офиса 14 дюймов", "stock": 3,
-     "characteristics": {"Экран": "14 дюймов", "Память": "8 ГБ", "Накопитель": "256 ГБ SSD"}},
+     "characteristics": {"Экран": "14 дюймов", "Память": "8 ГБ", "Накопитель": "256 ГБ SSD"}, "certificate": None},
     {"id": "demo-201", "article": "DEMO-201", "name": "Беспроводная мышь", "stock": 24,
-     "characteristics": {"Подключение": "USB адаптер", "Цвет": "Чёрный"}},
+     "characteristics": {"Подключение": "USB адаптер", "Цвет": "Чёрный"}, "certificate": None},
 ]
+DEMO_PURCHASE_TERMS = {
+    "payment": "Оплата: синтетический пример — условно при получении.",
+    "delivery": "Доставка: синтетический пример — условно за 3–5 дней.",
+    "minimum": "Минимальная партия: синтетический пример — 1 штука.",
+}
 
 
 def _products(payload):
@@ -136,6 +142,66 @@ def _product_query(message):
     return re.sub(r"\s+", " ", cleaned).strip(" ,.!?:;")
 
 
+def _demo_purchase_terms(query):
+    lowered = query.casefold()
+    selected = []
+    if re.search(r"оплат|плат[её]ж|рассроч|payment|pay\b", lowered):
+        selected.append("payment")
+    if re.search(r"достав|привез|сроки?\b|delivery|shipping", lowered):
+        selected.append("delivery")
+    if re.search(r"миним|парт[ияию]|moq\b|minimum", lowered):
+        selected.append("minimum")
+    if not selected and re.search(r"услови|покупк|приобрести|terms\b|purchase", lowered):
+        selected = list(DEMO_PURCHASE_TERMS)
+    if not selected:
+        return None
+    rows = "\n".join(DEMO_PURCHASE_TERMS[key] for key in selected)
+    return ("DEMO / СИНТЕТИЧЕСКИЕ ПРИМЕРЫ. Это вымышленные значения только для демонстрации; "
+            "они не являются реальными условиями EKT.\n" + rows)
+
+
+def _demo_certificate_response(query, state, prefix=""):
+    if not re.search(r"сертификат|сертификац|certificate|certification", query, re.I):
+        return None
+    product_text = re.sub(
+        r"\b(сертификат\w*|сертификац\w*|certificate\w*|certification\w*|покажи(?:те)?|есть|ли|у|для|на|по|товар\w*|документ\w*|а|please|show|is|there|any|does|this|have|of|for|product)\b",
+        " ", query, flags=re.I)
+    product_text = re.sub(r"\s+", " ", product_text).strip(" ,.!?:;")
+    if not product_text:
+        return {"reply": prefix + "Уточните товар или артикул, например: «сертификат DEMO-101».",
+                "products": [], "mode": "demo", "cart": _cart_view(state)}
+
+    rows = DEMO_PRODUCTS
+    article_match = re.search(r"\bDEMO-\d+\b", product_text, re.I)
+    if article_match:
+        candidates = [row for row in rows if row["article"].casefold() == article_match.group(0).casefold()]
+    else:
+        terms = set(re.findall(r"[\w-]+", product_text.casefold()))
+        scored = [(len(terms & set(re.findall(r"[\w-]+", row["name"].casefold()))), row) for row in rows]
+        best = max((score for score, _ in scored), default=0)
+        candidates = [row for score, row in scored if score == best and score > 0]
+
+    if len(candidates) != 1:
+        if not candidates:
+            detail = "Не нашёл товар с таким артикулом или названием."
+        else:
+            options = ", ".join(f"{row['article']} — {row['name']}" for row in candidates)
+            detail = f"Уточните, для какого товара нужен сертификат: {options}."
+        return {"reply": prefix + "DEMO: " + detail, "products": [], "mode": "demo", "cart": _cart_view(state)}
+
+    product = candidates[0]
+    certificate = product.get("certificate")
+    if not certificate:
+        reply = (f"DEMO / СИНТЕТИЧЕСКИЕ ДАННЫЕ: для товара {product['name']} ({product['article']}) "
+                 "сертификат в demo-данных отсутствует. Это не говорит о наличии или отсутствии реального документа EKT.")
+        return {"reply": prefix + reply, "products": [], "mode": "demo", "cart": _cart_view(state)}
+
+    href = f"/demo-certificates/{product['article']}"
+    reply = (f"DEMO / СИНТЕТИЧЕСКИЕ ДАННЫЕ — не реальный документ EKT. Для товара {product['name']}: "
+             f"{certificate['title']}. {certificate['description']}")
+    return {"reply": prefix + reply, "products": [], "mode": "demo", "cart": _cart_view(state), "certificate_url": href}
+
+
 def respond(message, session_id="demo"):
     query = message.strip()
     if not query:
@@ -183,6 +249,12 @@ def respond(message, session_id="demo"):
                 return _cart_reply(state, prefix + f"Запрошено {quantity} шт. {product['name']}; доступный stock — {max(available, 0)} шт. Уменьшите количество. Корзина не изменена.")
             state["pending"] = {"product": product, "quantity": quantity}
             return _cart_reply(state, prefix + f"Подтвердите добавление: {product['name']} (артикул {product['article']}), количество {quantity} шт.; доступный stock сейчас {available} шт. Напишите «да, добавь» для подтверждения или «отмена».")
+        terms = _demo_purchase_terms(query)
+        if terms:
+            return _cart_reply(state, prefix + terms)
+        certificate_reply = _demo_certificate_response(query, state, prefix)
+        if certificate_reply:
+            return certificate_reply
         if re.fullmatch(r"\s*(корзина|покажи корзину|моя корзина)\s*[.!]*\s*", query, re.I):
             return _cart_reply(state, "Demo-корзина пуста." if not state["cart"] else "Содержимое demo-корзины:")
     # The assistant performs catalog lookup only. It cannot place orders, reserve stock,
@@ -224,7 +296,7 @@ PAGE = r'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="view
 <main><section class="box"><header class="head"><h1>Помощник по каталогу EKT</h1><p>Поиск товара по артикулу или названию</p><p style="font-weight:700;color:#ffe18a">__MODE_LABEL__</p></header><div class="messages" id="messages"><div class="msg">Здравствуйте! Укажите артикул или название товара — проверю каталог, наличие и характеристики.</div></div><form class="form" id="form"><input id="q" maxlength="160" autocomplete="off" placeholder="Например, артикул или название" required><button id="send">Найти</button></form><small>Чат только показывает сведения каталога. Он не оформляет заказы и не запрашивает платёжные данные.</small></section></main>
 <script>const log=document.querySelector('#messages'), form=document.querySelector('#form'), input=document.querySelector('#q'), send=document.querySelector('#send');
 function msg(text, cls=''){let d=document.createElement('div');d.className='msg '+cls;d.textContent=text;log.append(d);log.scrollTop=log.scrollHeight;return d}
-form.onsubmit=async e=>{e.preventDefault();let text=input.value.trim();if(!text)return;msg(text,'user');input.value='';send.disabled=true;try{let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});let data=await r.json();msg(data.reply||'Не удалось обработать запрос.');for(let p of (data.products||[])){let box=document.createElement('div');box.className='card';let h=document.createElement('h3');h.textContent=p.name;box.append(h);let line=document.createElement('div');line.className='muted';line.textContent='Артикул: '+p.article+' · Наличие: '+p.stock+(p.price?' · Цена: '+p.price:'');box.append(line);if(p.characteristics?.length){let ul=document.createElement('ul');ul.className='attrs';for(let a of p.characteristics){let li=document.createElement('li');li.textContent=(a.name||a.key||'Характеристика')+': '+(a.value??a.valueName??'');ul.append(li)}box.append(ul)}log.append(box)}if(data.cart_url){let a=document.createElement('a');a.href=data.cart_url;a.textContent='Открыть demo-корзину';a.className='msg';a.style.display='inline-block';log.append(a)}log.scrollTop=log.scrollHeight}catch{msg('Сервис временно недоступен. Попробуйте позже.')}finally{send.disabled=false;input.focus()}};</script></html>'''
+form.onsubmit=async e=>{e.preventDefault();let text=input.value.trim();if(!text)return;msg(text,'user');input.value='';send.disabled=true;try{let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});let data=await r.json();msg(data.reply||'Не удалось обработать запрос.');for(let p of (data.products||[])){let box=document.createElement('div');box.className='card';let h=document.createElement('h3');h.textContent=p.name;box.append(h);let line=document.createElement('div');line.className='muted';line.textContent='Артикул: '+p.article+' · Наличие: '+p.stock+(p.price?' · Цена: '+p.price:'');box.append(line);if(p.characteristics?.length){let ul=document.createElement('ul');ul.className='attrs';for(let a of p.characteristics){let li=document.createElement('li');li.textContent=(a.name||a.key||'Характеристика')+': '+(a.value??a.valueName??'');ul.append(li)}box.append(ul)}log.append(box)}if(data.certificate_url){let a=document.createElement('a');a.href=data.certificate_url;a.textContent='Открыть demo-макет сертификата';a.className='msg';a.style.display='inline-block';log.append(a)}if(data.cart_url){let a=document.createElement('a');a.href=data.cart_url;a.textContent='Открыть demo-корзину';a.className='msg';a.style.display='inline-block';log.append(a)}log.scrollTop=log.scrollHeight}catch{msg('Сервис временно недоступен. Попробуйте позже.')}finally{send.disabled=false;input.focus()}};</script></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -244,6 +316,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if DEMO_MODE and path.startswith("/demo-certificates/"):
+            article = path.rsplit("/", 1)[-1].upper()
+            product = next((row for row in DEMO_PRODUCTS if row["article"] == article), None)
+            if product is None or not product.get("certificate"):
+                self.send_error(404); return
+            certificate = product["certificate"]
+            body = ("<!doctype html><html lang='ru'><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>DEMO certificate</title>"
+                    "<style>body{font:16px system-ui;max-width:700px;margin:8vh auto;padding:24px;color:#172033}main{border:4px dashed #bd5e2b;border-radius:16px;padding:28px}strong{color:#a33}</style>"
+                    "<main><h1>DEMO / СИНТЕТИЧЕСКИЙ МАКЕТ</h1><strong>НЕ РЕАЛЬНЫЙ СЕРТИФИКАТ EKT · НЕ ЯВЛЯЕТСЯ ДОКУМЕНТОМ</strong>"
+                    f"<h2>{html.escape(certificate['title'])}</h2><p>Товар: {html.escape(product['name'])} ({html.escape(article)})</p>"
+                    f"<p>{html.escape(certificate['description'])}</p><p>Это демонстрационный текст, а не подтверждение соответствия.</p><a href='/'>Вернуться в чат</a></main></html>").encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if DEMO_MODE and path == "/demo-cart":
             session_id, is_new = self._session_cookie()
             state = _session(session_id)
