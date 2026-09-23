@@ -1,0 +1,11 @@
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+__pycache__/
+*.py[cod]
