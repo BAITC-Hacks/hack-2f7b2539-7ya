@@ -192,7 +192,51 @@ def _demo_alternatives(query, rows, reference_products=()):
 
 def _session(session_id):
     with DEMO_SESSIONS_LOCK:
-        return DEMO_SESSIONS.setdefault(session_id, {"cart": {}, "pending": None})
+        return DEMO_SESSIONS.setdefault(session_id, {"cart": {}, "pending": None, "last_selected": None})
+
+
+def _demo_context_product(state):
+    article = state.get("last_selected")
+    return next((row for row in DEMO_PRODUCTS if row["article"].casefold() == str(article).casefold()), None)
+
+
+def _demo_search_query(query):
+    return re.sub(r"\s+", " ", re.sub(r"\b(покажи(?:те)?|показать|найди|найти|show|find|товар|product)\b", " ", query, flags=re.I)).strip(" ,.!?:;")
+
+
+def _demo_context_intent(query):
+    lowered = query.casefold()
+    if re.search(r"сертификат|сертификац|certificate|certification", lowered):
+        return "certificate"
+    if re.search(r"балама|альтернатив|замен|alternative", lowered):
+        return "alternative"
+    if re.search(r"сипаттам|қасиет|характеристик|specification", lowered):
+        return "characteristics"
+    if re.search(r"сколько\s+стоит|цен[аыуе]|price|cost|how\s+much|бағасы|баға\w*\s+қанша", lowered):
+        return "price"
+    if re.search(r"остаток|наличи|сколько\s+(?:есть|остал)|availability|stock|бар\s+ма|қанша\s+(?:дана\s+)?бар", lowered):
+        return "stock"
+    return None
+
+
+def _demo_context_target(query, state, intent):
+    text = re.sub(r"\b(какой|какое|какая|сколько|есть|ли|а|и|покажи|показать|остаток|наличие|наличии|осталось|стоит|цена|цену|сертификат\w*|сертификац\w*|бар|ма|қанша|дана|бағасы|баға|сипаттам\w*|қасиет\w*|қандай|характеристик\w*|please|what|is|the|stock|availability|price|cost|how|much|certificate)\b", " ", query, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" ,.!?:;")
+    if not text:
+        product = _demo_context_product(state)
+        return ([product] if product else []), False
+    matches, _, _ = search(text)
+    return matches, True
+
+
+def _demo_clarify_product(state, candidates=()):
+    state["last_selected"] = None
+    if candidates:
+        options = ", ".join(f"{_text(row, ('article', 'sku', 'code'))} — {_text(row, ('name', 'title'))}" for row in candidates)
+        reply = f"Уточните артикул или товар: {options}."
+    else:
+        reply = "Уточните артикул или название товара."
+    return {"reply": reply, "products": [_safe_product(row) for row in candidates], "mode": "demo", "cart": _cart_view(state)}
 
 
 def _demo_stock(product):
@@ -212,11 +256,11 @@ def _cart_reply(state, reply):
 
 
 def _demo_cart_intent(message):
-    return bool(re.search(r"\b(добавь|добавить|положи|положить|корзин[уы]?|add|cart)\b", message.casefold()))
+    return bool(re.search(r"добавь|добавить|положи|положить|корзин[уы]?|add|cart|қос(?:шы|у)?|себет", message.casefold()))
 
 
 def _demo_cart_view_intent(message):
-    return bool(re.fullmatch(r"\s*(корзина|покажи корзину|моя корзина)\s*[.!?]*\s*", message, re.I))
+    return bool(re.fullmatch(r"\s*(корзина|покажи корзину|моя корзина|себет|себетті көрсет|себетімді көрсет|менің себетім)\s*[.!?]*\s*", message, re.I))
 
 
 def _demo_cart_contents(state):
@@ -235,7 +279,8 @@ def _requested_quantity(message):
 
 
 def _product_query(message):
-    cleaned = re.sub(r"\b(добавь|добавить|положи|положить|в|корзину|корзина|корзине|add|to|cart)\b", " ", message, flags=re.I)
+    cleaned = re.sub(r"\b(DEMO-\d+)(?:-[\w]+)?\b", r"\1", message, flags=re.I)
+    cleaned = re.sub(r"добавь|добавить|положи|положить|в|корзину|корзина|корзине|add|to|cart|қос(?:шы|у)?|себетке|себет|дана", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"(?<![\w-])\d+(?![\w-])", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" ,.!?:;")
 
@@ -243,13 +288,13 @@ def _product_query(message):
 def _demo_purchase_terms(query):
     lowered = query.casefold()
     selected = []
-    if re.search(r"оплат|плат[её]ж|рассроч|payment|pay\b", lowered):
+    if re.search(r"оплат|плат[её]ж|рассроч|payment|pay\b|төлем", lowered):
         selected.append("payment")
-    if re.search(r"достав|привез|сроки?\b|delivery|shipping", lowered):
+    if re.search(r"достав|привез|сроки?\b|delivery|shipping|жеткіз", lowered):
         selected.append("delivery")
-    if re.search(r"миним|парт[ияию]|moq\b|minimum", lowered):
+    if re.search(r"миним|парт[ияию]|moq\b|minimum|ең\s+аз|минималды\s+партия", lowered):
         selected.append("minimum")
-    if not selected and re.search(r"услови|покупк|приобрести|terms\b|purchase", lowered):
+    if not selected and re.search(r"услови|покупк|приобрести|terms\b|purchase|сатып\s+алу", lowered):
         selected = list(DEMO_PURCHASE_TERMS)
     if not selected:
         return None
@@ -258,13 +303,15 @@ def _demo_purchase_terms(query):
             "они не являются реальными условиями EKT.\n" + rows)
 
 
-def _demo_certificate_response(query, state, prefix=""):
+def _demo_certificate_response(query, state, prefix="", default_product=None):
     if not re.search(r"сертификат|сертификац|certificate|certification", query, re.I):
         return None
     product_text = re.sub(
-        r"\b(сертификат\w*|сертификац\w*|certificate\w*|certification\w*|покажи(?:те)?|есть|ли|у|для|на|по|товар\w*|документ\w*|а|please|show|is|there|any|does|this|have|of|for|product)\b",
+        r"\b(сертификат\w*|сертификац\w*|certificate\w*|certification\w*|покажи(?:те)?|есть|ли|у|для|на|по|товар\w*|документ\w*|а|бар|ма|please|show|is|there|any|does|this|have|of|for|product)\b",
         " ", query, flags=re.I)
     product_text = re.sub(r"\s+", " ", product_text).strip(" ,.!?:;")
+    if not product_text and default_product is not None:
+        product_text = default_product["article"]
     if not product_text:
         return {"reply": prefix + "Уточните товар или артикул, например: «сертификат DEMO-101».",
                 "products": [], "mode": "demo", "cart": _cart_view(state)}
@@ -280,6 +327,7 @@ def _demo_certificate_response(query, state, prefix=""):
         candidates = [row for score, row in scored if score == best and score > 0]
 
     if len(candidates) != 1:
+        state["last_selected"] = None
         if not candidates:
             detail = "Не нашёл товар с таким артикулом или названием."
         else:
@@ -288,6 +336,7 @@ def _demo_certificate_response(query, state, prefix=""):
         return {"reply": prefix + "DEMO: " + detail, "products": [], "mode": "demo", "cart": _cart_view(state)}
 
     product = candidates[0]
+    state["last_selected"] = product["article"]
     certificate = product.get("certificate")
     if not certificate:
         reply = (f"DEMO / СИНТЕТИЧЕСКИЕ ДАННЫЕ: для товара {product['name']} ({product['article']}) "
@@ -309,7 +358,7 @@ def respond(message, session_id="demo"):
         state = _session(session_id)
         pending = state.get("pending")
         if pending:
-            if re.fullmatch(r"\s*(да|да,?\s*(добавь|подтверждаю)|подтверждаю|подтвердить|yes)\s*[.!]*\s*", query, re.I):
+            if re.fullmatch(r"\s*(да|да,?\s*(добавь|подтверждаю)|подтверждаю|подтвердить|yes|иә|ия|иә,?\s*қос(?:шы|у)?)\s*[.!]*\s*", query, re.I):
                 product, quantity = pending["product"], pending["quantity"]
                 article = product["article"]
                 available = _demo_stock(product) - state["cart"].get(article, {}).get("quantity", 0)
@@ -320,7 +369,7 @@ def respond(message, session_id="demo"):
                 current["quantity"] += quantity
                 return {"reply": f"Добавлено в demo-корзину: {product['name']} — {quantity} шт. Доступный stock до добавления: {available} шт.",
                         "products": [], "mode": "demo", "cart": _cart_view(state), "cart_url": "/demo-cart"}
-            if re.fullmatch(r"\s*(нет|отмена|отменить|не добавляй|no)\s*[.!]*\s*", query, re.I):
+            if re.fullmatch(r"\s*(нет|отмена|отмени|отменить|не добавляй|no|жоқ|жоқ,?\s*қоспа)\s*[.!]*\s*", query, re.I):
                 state["pending"] = None
                 return _cart_reply(state, "Хорошо, отменил. Demo-корзина не изменена.")
             state["pending"] = None
@@ -336,7 +385,11 @@ def respond(message, session_id="demo"):
             quantity = _requested_quantity(query)
             product_text = _product_query(query)
             if not product_text:
-                return _cart_reply(state, prefix + "Укажите артикул или название и количество, например: «добавь 2 DEMO-101».")
+                selected = _demo_context_product(state)
+                if selected:
+                    product_text = selected["article"]
+                else:
+                    return _cart_reply(state, prefix + "Укажите артикул или название и количество, например: «добавь 2 DEMO-101».")
             if quantity is None or quantity < 1:
                 return _cart_reply(state, prefix + "Укажите положительное количество, например: «добавь 2 DEMO-101».")
             candidates, _, _ = search(product_text)
@@ -344,8 +397,10 @@ def respond(message, session_id="demo"):
                 return _cart_reply(state, prefix + "Не нашёл такой товар. Уточните артикул или название; корзина не изменена.")
             product = _safe_product(candidates[0])
             if len(candidates) > 1 and product["article"].casefold() != product_text.casefold():
+                state["last_selected"] = None
                 return {"reply": prefix + "Нашлось несколько товаров. Выберите один по артикулу, затем укажите количество.",
                         "products": [_safe_product(row) for row in candidates], "mode": "demo", "cart": _cart_view(state)}
+            state["last_selected"] = product["article"]
             stock = _demo_stock(candidates[0])
             available = stock - state["cart"].get(product["article"], {}).get("quantity", 0)
             if quantity > available:
@@ -355,19 +410,60 @@ def respond(message, session_id="demo"):
         terms = _demo_purchase_terms(query)
         if terms:
             return _cart_reply(state, prefix + terms)
-        certificate_reply = _demo_certificate_response(query, state, prefix)
+        context_intent = _demo_context_intent(query)
+        context_product = _demo_context_product(state)
+        if context_intent in ("stock", "price", "characteristics"):
+            candidates, _ = _demo_context_target(query, state, context_intent)
+            if len(candidates) != 1:
+                return _demo_clarify_product(state, candidates if len(candidates) > 1 else ())
+            selected = candidates[0]
+            state["last_selected"] = _text(selected, ("article", "sku", "articul", "vendorCode", "vendor_code", "code"))
+            safe = _safe_product(selected)
+            if context_intent == "stock":
+                reply = f"DEMO: {safe['name']} ({safe['article']}) — доступно {safe['stock']} шт."
+            elif context_intent == "price":
+                reply = f"DEMO: для {safe['name']} ({safe['article']}) цена в синтетических demo-данных не указана."
+            else:
+                facts = _demo_characteristic_text(selected)
+                detail = "; ".join(f"{key}: {value}" for key, value in facts) or "характеристики не указаны"
+                reply = f"DEMO: характеристики {safe['name']} ({safe['article']}): {detail}."
+            return _cart_reply(state, prefix + reply)
+        certificate_reply = _demo_certificate_response(query, state, prefix, context_product)
         if certificate_reply:
+            if "Уточните товар или артикул" in certificate_reply["reply"] and context_product is None:
+                state["last_selected"] = None
             return certificate_reply
+        if context_intent == "alternative" or re.search(r"балама|альтернатив|замен|alternative", query, re.I):
+            reference = context_product
+            article_match = re.search(r"\bDEMO-\d+\b", query, re.I)
+            if article_match:
+                reference = next((row for row in DEMO_PRODUCTS if row["article"].casefold() == article_match.group(0).casefold()), None)
+            if reference is None:
+                return _cart_reply(state, prefix + "Уточните товар или артикул, для которого нужна альтернатива.")
+            state["last_selected"] = reference["article"]
+            category = _demo_category(_text(reference, ("name", "title")))
+            category_query = DEMO_CATEGORY_NAMES.get(category, "")
+            alternatives = _demo_alternatives(category_query, DEMO_PRODUCTS, (reference,))
+            reply = ("DEMO: возможные альтернативы; основание выбора показано у каждой позиции."
+                     if alternatives else "DEMO: подходящей альтернативы с подтверждаемыми demo-характеристиками не нашлось.")
+            return {"reply": prefix + reply, "products": alternatives, "mode": "demo", "cart": _cart_view(state)}
     # The assistant performs catalog lookup only. It cannot place orders, reserve stock,
     # request credentials/payment data, or claim availability absent an API value.
     try:
-        matches, count, catalog_rows = search(query)
+        search_query = _demo_search_query(query) if DEMO_MODE else query
+        matches, count, catalog_rows = search(search_query)
     except EKTAPIError as exc:
         return {"reply": f"Не удалось проверить каталог EKT: {exc}", "products": [], "mode": "api"}
     mode = "demo" if DEMO_MODE else "api"
     mode_note = "ДЕМО: синтетические данные, не отражают реальный каталог." if DEMO_MODE else ""
     if DEMO_MODE:
         mode_note = prefix + mode_note
+        if len(matches) == 1:
+            state["last_selected"] = _text(matches[0], ("article", "sku", "articul", "vendorCode", "vendor_code", "code")) or None
+        elif len(matches) > 1:
+            state["last_selected"] = None
+        elif not matches:
+            state["last_selected"] = None
         if matches and all(_demo_stock(row) <= 0 for row in matches):
             alternatives = _demo_alternatives(query, catalog_rows, matches)
             product_name = _text(matches[0], ("name", "title")) or query
@@ -409,6 +505,8 @@ def respond(message, session_id="demo"):
         reply = "Нашёл товар в каталоге EKT. Наличие и характеристики показаны по данным API."
         return {"reply": (mode_note + " " if mode_note else "") + reply, "products": products, "mode": mode}
     reply = f"Нашёл {len(products)} совпадений в каталоге (всего записей: {count}). Выберите подходящий:"
+    if DEMO_MODE:
+        reply = f"В demo-каталоге нашлось несколько товаров. Уточните товар или выберите артикул:"
     return {"reply": (mode_note + " " if mode_note else "") + reply, "products": products, "mode": mode}
 
 

@@ -163,5 +163,140 @@ class DemoAlternativeTests(unittest.TestCase):
         self.assertIn("нет доступной релевантной альтернативы", result["reply"])
 
 
+class DemoContextTests(unittest.TestCase):
+    def setUp(self):
+        self.was_demo = app.DEMO_MODE
+        app.DEMO_MODE = True
+        self.session_id = "dialog-context-regression"
+        app.DEMO_SESSIONS.pop(self.session_id, None)
+
+    def tearDown(self):
+        app.DEMO_MODE = self.was_demo
+        app.DEMO_SESSIONS.pop(self.session_id, None)
+
+    def test_stock_followup_uses_last_selected_product(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        result = app.respond("какой остаток?", self.session_id)
+        self.assertIn("DEMO-101", result["reply"])
+        self.assertIn("доступно 8 шт.", result["reply"])
+
+    def test_selecting_another_product_switches_context(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        app.respond("покажи DEMO-201", self.session_id)
+        result = app.respond("какой остаток?", self.session_id)
+        self.assertIn("DEMO-201", result["reply"])
+        self.assertIn("доступно 24 шт.", result["reply"])
+
+    def test_certificate_followup_uses_last_selected_product(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        result = app.respond("а сертификат есть?", self.session_id)
+        self.assertIn("DEMO-101", result["reply"])
+        self.assertIn("DEMO-CERT-101", result["reply"])
+        self.assertEqual(result["certificate_url"], "/demo-certificates/DEMO-101")
+
+    def test_add_quantity_uses_context_and_waits_for_confirmation(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        proposal = app.respond("добавь 2", self.session_id)
+        self.assertIn("DEMO-101", proposal["reply"])
+        self.assertIn("количество 2 шт.", proposal["reply"])
+        self.assertEqual(proposal["cart"], [])
+        self.assertEqual(app._session(self.session_id)["cart"], {})
+        self.assertEqual(app._session(self.session_id)["pending"]["product"]["article"], "DEMO-101")
+
+    def test_ambiguous_product_selection_requests_clarification_and_clears_context(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        result = app.respond("покажи ноутбук", self.session_id)
+        self.assertIn("Уточните", result["reply"])
+        self.assertEqual({row["article"] for row in result["products"]}, {"DEMO-101", "DEMO-102"})
+        followup = app.respond("какой остаток?", self.session_id)
+        self.assertIn("Уточните артикул", followup["reply"])
+
+    def test_cart_view_does_not_change_context_or_cart(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        app.respond("добавь 2", self.session_id)
+        app.respond("да, добавь", self.session_id)
+        state = app._session(self.session_id)
+        before_cart = deepcopy(state["cart"])
+        before_context = state["last_selected"]
+        result = app.respond("покажи корзину", self.session_id)
+        self.assertEqual(result["cart_url"], "/demo-cart")
+        self.assertEqual(state["cart"], before_cart)
+        self.assertEqual(state["last_selected"], before_context)
+        self.assertIn("DEMO-101", state["last_selected"])
+
+    def test_explicit_confirmation_still_adds_context_product(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        app.respond("добавь 2", self.session_id)
+        result = app.respond("да, добавь", self.session_id)
+        self.assertEqual(result["cart"][0]["article"], "DEMO-101")
+        self.assertEqual(result["cart"][0]["quantity"], 2)
+        self.assertEqual(result["cart_url"], "/demo-cart")
+
+    def test_price_followup_uses_context_without_inventing_price(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        result = app.respond("сколько стоит?", self.session_id)
+        self.assertIn("DEMO-101", result["reply"])
+        self.assertIn("цена в синтетических demo-данных не указана", result["reply"])
+
+    def test_cancel_without_pending_does_not_change_cart(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        state = app._session(self.session_id)
+        before = deepcopy(state["cart"])
+        app.respond("отмени", self.session_id)
+        self.assertEqual(state["cart"], before)
+
+
+class DemoKazakhTests(unittest.TestCase):
+    def setUp(self):
+        self.was_demo = app.DEMO_MODE
+        app.DEMO_MODE = True
+        self.session_id = "kazakh-regression-session"
+        app.DEMO_SESSIONS.pop(self.session_id, None)
+
+    def tearDown(self):
+        app.DEMO_MODE = self.was_demo
+        app.DEMO_SESSIONS.pop(self.session_id, None)
+
+    def test_stock_price_characteristics_and_certificate_queries(self):
+        stock = app.respond("DEMO-101 бар ма?", self.session_id)
+        self.assertIn("DEMO-101", stock["reply"])
+        self.assertIn("8 шт.", stock["reply"])
+        price = app.respond("Бағасы қанша?", self.session_id)
+        self.assertIn("DEMO-101", price["reply"])
+        self.assertIn("цена в синтетических demo-данных не указана", price["reply"])
+        specs = app.respond("Сипаттамалары қандай?", self.session_id)
+        self.assertIn("DEMO-101", specs["reply"])
+        self.assertIn("15.6 дюйма", specs["reply"])
+        certificate = app.respond("Сертификаты бар ма?", self.session_id)
+        self.assertIn("DEMO-CERT-101", certificate["reply"])
+
+    def test_kazakh_cart_view_add_confirmation_and_cancel(self):
+        app.respond("покажи DEMO-101", self.session_id)
+        proposal = app.respond("2 дана қос", self.session_id)
+        self.assertIn("DEMO-101", proposal["reply"])
+        self.assertEqual(proposal["cart"], [])
+        declined = app.respond("Жоқ, қоспа", self.session_id)
+        self.assertIn("не изменена", declined["reply"])
+        self.assertEqual(app._session(self.session_id)["cart"], {})
+
+        app.respond("2 дана қос", self.session_id)
+        confirmed = app.respond("Иә, қос", self.session_id)
+        self.assertEqual(confirmed["cart"][0]["article"], "DEMO-101")
+        self.assertEqual(confirmed["cart"][0]["quantity"], 2)
+        viewed = app.respond("Себетті көрсет", self.session_id)
+        self.assertEqual(viewed["cart_url"], "/demo-cart")
+        self.assertEqual(viewed["cart"][0]["quantity"], 2)
+
+    def test_kazakh_terms_and_alternative_queries(self):
+        terms = app.respond("Төлем және жеткізу шарттары", self.session_id)
+        self.assertIn("DEMO / СИНТЕТИЧЕСКИЕ ПРИМЕРЫ", terms["reply"])
+        self.assertIn("Оплата:", terms["reply"])
+        self.assertIn("Доставка:", terms["reply"])
+        app.respond("покажи DEMO-101", self.session_id)
+        alternatives = app.respond("Балама бар ма?", self.session_id)
+        self.assertTrue(alternatives["products"])
+        self.assertTrue(all(row.get("alternative_reason") for row in alternatives["products"]))
+
+
 if __name__ == "__main__":
     unittest.main()
